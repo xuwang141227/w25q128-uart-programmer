@@ -42,7 +42,6 @@ class FakeFpga:
         self.pages = []
         self.flash = bytearray(b"\xFF" * MAX_IMAGE_SIZE)
         self.image_size = 0
-        self.mode = "write"
         self.timeout = 0.1
         self.flushed = False
 
@@ -77,8 +76,6 @@ class FakeFpga:
                 0xE4: 0,
                 0xE6: 4,
                 0xE7: 4,
-                0xF5: 0,
-                0xFA: 0,
             }.get(command)
             if payload_length is None:
                 raise AssertionError(f"unexpected command 0x{command:02X}")
@@ -115,9 +112,6 @@ class FakeFpga:
             self.pages.append(payload)
             expected = 0xF3 if offset + PAGE_SIZE >= self.image_size else 0xF2
             self._reply(command, expected)
-        elif command == 0xF5:
-            self.mode = "read"
-            self._reply(command, 0xF6)
         elif command == 0xE6:
             if command == self.error_command:
                 self.output.extend(ERROR_REPLY)
@@ -127,9 +121,6 @@ class FakeFpga:
                 if self.corrupt_readback and address == 0:
                     page = bytes((page[0] ^ 1,)) + page[1:]
                 self.output.extend(page)
-        elif command == 0xFA:
-            self.mode = "write"
-            self._reply(command, 0xFB)
         elif command == 0xE7:
             self._reply(command, 0xF7)
 
@@ -138,13 +129,19 @@ class FlashHostTests(unittest.TestCase):
     def setUp(self):
         self.fpga = FakeFpga()
         self.logs = []
+        self.waits = []
         self.host = FlashHost(
             self.fpga,
             command_timeout=0.03,
             erase_margin=0.01,
-            sleep=lambda _: None,
+            sleep=self.record_wait,
             log=self.logs.append,
         )
+
+    def record_wait(self, seconds):
+        self.waits.append(seconds)
+        self.assertEqual(self.fpga.commands[-1][0], 0xE3)
+        self.assertEqual(self.fpga.output, bytearray())
 
     def test_programs_513_bytes_with_padding_and_verifies_every_page(self):
         image = bytes((i % 251 for i in range(513)))
@@ -159,19 +156,22 @@ class FlashHostTests(unittest.TestCase):
         self.assertEqual(
             [cmd for cmd, _ in self.fpga.commands].count(0xE6), 3
         )
-        self.assertEqual(self.fpga.mode, "write")
+        self.assertEqual(self.waits, [0.02] * 3)
+        self.assertEqual(
+            [cmd for cmd, _ in self.fpga.commands],
+            [0xE1, 0xE2, 0xE3, 0xE6, 0xE3, 0xE6, 0xE3, 0xE6],
+        )
+        self.assertEqual(
+            [payload for cmd, payload in self.fpga.commands if cmd == 0xE6],
+            [address.to_bytes(4, "big") for address in (0, 256, 512)],
+        )
         self.assertEqual(self.fpga.frames[1], b"\x55\xE1\xE2")
         self.assertIn(b"\x55\xE1\xE3" + image[512:].ljust(256, b"\xFF"),
                       self.fpga.frames)
-        self.assertEqual(
-            [cmd for cmd, _ in self.fpga.commands].count(0xFA), 3
-        )
         self.assertIn("Received: 55 E1 F3", self.logs)
         self.assertIn("Sending: 55 E1 E2", self.logs)
         self.assertIn("Received: 55 E1 F2", self.logs)
         self.assertIn("Verified page 3/3", self.logs)
-        self.assertIn("Device confirmed read mode", self.logs)
-        self.assertIn("Device confirmed write mode", self.logs)
         self.assertEqual(self.logs[-1], "Programming complete: verified 3 page(s)")
 
     def test_partial_reads_and_writes_are_completed(self):
@@ -190,6 +190,16 @@ class FlashHostTests(unittest.TestCase):
         self.fpga.error_command = 0xE1
         with self.assertRaisesRegex(ProtocolError, "55 E1 F4"):
             self.host.begin(1)
+
+    def test_failed_page_write_does_not_wait_or_read(self):
+        self.host.begin(1)
+        self.fpga.error_command = 0xE3
+        with self.assertRaisesRegex(ProtocolError, "55 E1 F4"):
+            self.host.program(b"x")
+        self.assertEqual(self.waits, [])
+        self.assertEqual(
+            [cmd for cmd, _ in self.fpga.commands], [0xE1, 0xE2, 0xE3]
+        )
 
     def test_missing_ack_times_out(self):
         self.fpga.silent_command = 0xE1
@@ -211,9 +221,9 @@ class FlashHostTests(unittest.TestCase):
         self.host.begin(1)
         with self.assertRaisesRegex(ProtocolError, "verification failed"):
             self.host.program(b"x")
-        self.assertEqual(self.fpga.mode, "read")
         self.assertEqual(
-            [cmd for cmd, _ in self.fpga.commands].count(0xFA), 0
+            [cmd for cmd, _ in self.fpga.commands],
+            [0xE1, 0xE2, 0xE3, 0xE6],
         )
 
     def test_raw_page_beginning_with_error_prefix_is_valid_data(self):

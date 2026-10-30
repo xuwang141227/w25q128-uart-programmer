@@ -161,14 +161,6 @@ class FlashHost:
         self.log(f"Erase acknowledged for {sectors} sector(s) ({erase_size} bytes)")
         return erase_size
 
-    def set_read_mode(self) -> None:
-        self._command(0xF5, expected=0xF6)
-        self.log("Device confirmed read mode")
-
-    def set_write_mode(self) -> None:
-        self._command(0xFA, expected=0xFB)
-        self.log("Device confirmed write mode")
-
     def read_page(self, address: int) -> bytes:
         if not 0 <= address <= MAX_IMAGE_SIZE - PAGE_SIZE:
             raise ValueError(
@@ -221,8 +213,7 @@ class FlashHost:
             expected_ack = 0xF3 if page_index == page_count - 1 else 0xF2
             self._command(0xE3, page, expected=expected_ack)
 
-            self.sleep(0.01)
-            self.set_read_mode()
+            self.sleep(0.02)
             readback = self.read_page(offset)
             if readback != page:
                 mismatch = next(
@@ -234,7 +225,6 @@ class FlashHost:
                     f"read {readback[mismatch]:02X}, expected {page[mismatch]:02X}"
                 )
             self.log(f"Verified page {page_index + 1}/{page_count}")
-            self.set_write_mode()
         self.log(f"Programming complete: verified {page_count} page(s)")
 
 

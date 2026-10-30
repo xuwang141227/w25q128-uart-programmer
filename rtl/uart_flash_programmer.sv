@@ -28,7 +28,7 @@ module uart_flash_programmer #(
     reg [1:0] arg_index, flash_op;
     reg [7:0] page_index;
     reg [8:0] tx_index;
-    reg read_mode, image_erased, raw_response, flash_start;
+    reg image_erased, raw_response, flash_start;
     reg [23:0] flash_address;
     wire flash_ready, flash_done, flash_error, read_valid;
     wire [7:0] write_index, read_index, read_data;
@@ -63,7 +63,7 @@ module uart_flash_programmer #(
             state <= HEADER; reboot_n <= 1; tx_start <= 0; tx_data <= 0;
             command <= 0; response <= 0; argument <= 0; arg_index <= 0;
             total_length <= 0; written <= 0; erase_cursor <= 0; page_index <= 0;
-            read_mode <= 0; image_erased <= 0; raw_response <= 0; tx_index <= 0;
+            image_erased <= 0; raw_response <= 0; tx_index <= 0;
             flash_start <= 0; flash_op <= 0; flash_address <= 0; rx_timer <= 0;
         end else begin
             tx_start <= 0; flash_start <= 0;
@@ -83,7 +83,7 @@ module uart_flash_programmer #(
                             argument <= 0; arg_index <= 0; state <= ARGUMENT;
                         end
                         8'he3: begin page_index <= 0; state <= PAYLOAD; end
-                        8'he2, 8'he4, 8'hf5, 8'hfa: state <= DISPATCH;
+                        8'he2, 8'he4: state <= DISPATCH;
                         default: ack(8'hf4);
                     endcase
                 end
@@ -106,14 +106,14 @@ module uart_flash_programmer #(
                         end
                     end
                     8'he2: begin
-                        if (read_mode || total_length == 0) ack(8'hf4);
+                        if (total_length == 0) ack(8'hf4);
                         else begin
                             image_erased <= 0; written <= 0; erase_cursor <= 0;
                             flash_address <= 0; flash_op <= 2; state <= FLASH_START;
                         end
                     end
                     8'he3: begin
-                        if (read_mode || !image_erased || written >= total_length)
+                        if (!image_erased || written >= total_length)
                             ack(8'hf4);
                         else begin
                             flash_address <= written[23:0]; flash_op <= 1;
@@ -121,17 +121,15 @@ module uart_flash_programmer #(
                         end
                     end
                     8'he4: begin reboot_n <= 0; state <= HEADER; end
-                    8'hf5: begin read_mode <= 1; ack(8'hf6); end
-                    8'hfa: begin read_mode <= 0; ack(8'hfb); end
                     8'he6: begin
-                        if (!read_mode || argument > 32'h00ffff00) ack(8'hf4);
+                        if (argument > 32'h00ffff00) ack(8'hf4);
                         else begin
                             flash_address <= argument[23:0]; flash_op <= 0;
                             state <= FLASH_START;
                         end
                     end
                     8'he7: begin
-                        if (read_mode || argument >= 32'h01000000) ack(8'hf4);
+                        if (argument >= 32'h01000000) ack(8'hf4);
                         else begin
                             // Independent sector erase invalidates the image write session.
                             image_erased <= 0;
